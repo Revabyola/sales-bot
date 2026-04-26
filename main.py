@@ -363,7 +363,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif user_id == ADMIN_ID and awaiting == 'product_price':
         try:
-            price = int(text)
+            price = float(text)
             context.user_data['product_price'] = price
             context.user_data['awaiting'] = 'product_stock'
             await update.message.reply_text("📦 Введи *количество*:", parse_mode='Markdown')
