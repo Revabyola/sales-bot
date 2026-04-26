@@ -198,23 +198,44 @@ async def sell_product(query, product_id):
     product = cur.fetchone()
     
     if not product:
-        await query.answer("Товар не найден")
+        await query.answer("❌ Товар не найден")
         cur.close()
         conn.close()
         return
     
     if product['stock'] <= 0:
-        await query.answer("Нет в наличии!")
+        await query.answer("❌ Нет в наличии!")
         cur.close()
         conn.close()
         return
     
+    # Списываем 1 штуку
     cur.execute("UPDATE products SET stock = stock - 1, sold = sold + 1 WHERE id = %s", (product_id,))
     conn.commit()
+    
+    # Получаем обновлённые данные
+    cur.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+    updated = cur.fetchone()
     cur.close()
     conn.close()
     
-    await query.answer(f"✅ Продано! Осталось: {product['stock'] - 1} шт.")
+    # Обновляем меню
+    keyboard = [
+        [InlineKeyboardButton("🛒 Продать (-1)", callback_data=f"sell_{product_id}")],
+        [InlineKeyboardButton("📦 Пополнить (+)", callback_data=f"restock_{product_id}")],
+        [InlineKeyboardButton("❌ Удалить", callback_data=f"delete_product_{product_id}")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="my_products")],
+    ]
+    
+    await query.edit_message_text(
+        f"📦 *{updated['name']}*\n"
+        f"💰 Цена: {updated['price']} ₽\n"
+        f"📦 Остаток: {updated['stock']} шт.\n"
+        f"📊 Продано: {updated['sold']} шт.\n\n"
+        f"✅ *Продано!* Осталось: {updated['stock']} шт.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
 
 async def show_catalog(query, page=0):
     conn = get_db_connection()
