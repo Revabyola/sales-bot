@@ -172,6 +172,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['edit_product_id'] = product_id
         context.user_data['awaiting'] = 'change_stock'
         await query.edit_message_text("📦 Введи *новое количество*:", parse_mode='Markdown')
+    elif data.startswith("change_sold_"):
+        product_id = int(data.replace("change_sold_", ""))
+        context.user_data['edit_product_id'] = product_id
+        context.user_data['awaiting'] = 'change_sold'
+        await query.edit_message_text("📊 Введи *новое количество проданных*:", parse_mode='Markdown')
     elif data == "stats":
         await show_stats(query)
     
@@ -218,6 +223,7 @@ async def sell_product(query, product_id):
         [InlineKeyboardButton("📦 Пополнить (+)", callback_data=f"restock_{product_id}")],
         [InlineKeyboardButton("💰 Изменить цену", callback_data=f"change_price_{product_id}")],
         [InlineKeyboardButton("📋 Изменить кол-во", callback_data=f"change_stock_{product_id}")],
+        [InlineKeyboardButton("📊 Изменить продано", callback_data=f"change_sold_{product_id}")],
         [InlineKeyboardButton("❌ Удалить", callback_data=f"delete_product_{product_id}")],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_products")],
     ]
@@ -336,6 +342,7 @@ async def show_edit_menu(query, product_id):
         [InlineKeyboardButton("📦 Пополнить (+)", callback_data=f"restock_{product_id}")],
         [InlineKeyboardButton("💰 Изменить цену", callback_data=f"change_price_{product_id}")],
         [InlineKeyboardButton("📋 Изменить кол-во", callback_data=f"change_stock_{product_id}")],
+        [InlineKeyboardButton("📊 Изменить продано", callback_data=f"change_sold_{product_id}")],
         [InlineKeyboardButton("❌ Удалить", callback_data=f"delete_product_{product_id}")],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_products")],
     ]
@@ -455,10 +462,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO products (name, price, stock) VALUES (%s, %s, %s)",
-                (name, price, stock)
-            )
+            cur.execute("INSERT INTO products (name, price, stock) VALUES (%s, %s, %s)", (name, price, stock))
             conn.commit()
             cur.close()
             conn.close()
@@ -510,6 +514,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             await update.message.reply_text(
                 f"✅ Количество изменено на *{stock} шт.*!",
+                reply_markup=get_admin_keyboard(),
+                parse_mode='Markdown'
+            )
+        except:
+            await update.message.reply_text("❌ Введи число!")
+    
+    # Админ: изменение продано
+    elif user_id == ADMIN_ID and awaiting == 'change_sold':
+        try:
+            sold = int(text)
+            product_id = context.user_data['edit_product_id']
+            
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("UPDATE products SET sold = %s WHERE id = %s", (sold, product_id))
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            context.user_data.clear()
+            await update.message.reply_text(
+                f"✅ Количество проданных изменено на *{sold} шт.*!",
                 reply_markup=get_admin_keyboard(),
                 parse_mode='Markdown'
             )
@@ -576,15 +602,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_id != ADMIN_ID:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO chat_messages (client_id, message) VALUES (%s, %s)",
-            (user_id, text)
-        )
+        cur.execute("INSERT INTO chat_messages (client_id, message) VALUES (%s, %s)", (user_id, text))
         conn.commit()
         cur.close()
         conn.close()
         
-        # Отправляем админу с кнопкой "Ответить"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_to_{user_id}")]
         ])
