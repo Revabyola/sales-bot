@@ -17,7 +17,7 @@ CORS(app)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # Твой Telegram ID
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -31,7 +31,7 @@ def init_db():
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             description TEXT DEFAULT '',
-            price INTEGER NOT NULL,
+            price REAL NOT NULL,
             stock INTEGER NOT NULL DEFAULT 0,
             sold INTEGER NOT NULL DEFAULT 0,
             active BOOLEAN DEFAULT TRUE,
@@ -102,17 +102,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id == ADMIN_ID:
-        await update.message.reply_text(
-            "🔐 *Админ-панель*\n\nВыбери действие:",
-            reply_markup=get_admin_keyboard(),
-            parse_mode='Markdown'
-        )
+        keyboard = get_admin_keyboard()
+        text = "🔐 *Админ-панель*\n\nВыбери действие:"
     else:
+        keyboard = get_client_keyboard()
+        text = "👋 *Добро пожаловать!*\n\nЯ бот для заказа товаров.\nВыбери действие:"
+    
+    if update.message:
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
+
+# --- Ответ клиенту ---
+async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        return
+    
+    if not context.args or len(context.args) < 2:
         await update.message.reply_text(
-            "👋 *Добро пожаловать!*\n\nЯ бот для заказа товаров.\nВыбери действие:",
-            reply_markup=get_client_keyboard(),
+            "❌ Используй формат:\n`/reply ID текст`\n\n"
+            "Например: `/reply 123456789 Ваш заказ готов!`",
             parse_mode='Markdown'
         )
+        return
+    
+    try:
+        client_id = int(context.args[0])
+        reply_text = ' '.join(context.args[1:])
+        
+        # Сохраняем в БД
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO chat_messages (client_id, message, from_admin) VALUES (%s, %s, TRUE)",
+            (client_id, reply_text)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        # Отправляем клиенту
+        await context.bot.send_message(
+            client_id,
+            f"📩 *Ответ от продавца:*\n\n{reply_text}",
+            parse_mode='Markdown'
+        )
+        
+        await update.message.reply_text(f"✅ Ответ отправлен клиенту {client_id}!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 # --- Обработчик кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,7 +161,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
     
-    # --- КЛИЕНТ ---
+    # --- КЛИЕНТ И АДМИН: Каталог ---
     if data == "catalog":
         await show_catalog(query, page=0)
     
@@ -137,7 +177,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📞 *Связь с продавцом*\n\n"
             "Напиши своё сообщение прямо сюда, и я передам его продавцу.\n"
-            "Он ответит тебе в этом же чате.",
+            "Он ответит тебе в этом же чате.\n\n"
+            "_Просто напиши текст и отправь его._",
             parse_mode='Markdown'
         )
     
@@ -170,11 +211,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting'] = 'restock_amount'
         await query.edit_message_text("📦 Введи количество для пополнения:", parse_mode='Markdown')
     
+    elif data.startswith("sell_"):
+        product_id = int(data.replace("sell_", ""))
+        await sell_product(query, product_id)
+    
     elif data == "stats":
         await show_stats(query)
     
     elif data == "messages":
         await show_messages(query)
+
+# --- Продажа товара ---
+async def sell_product(query, product_id):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+    product = cur.fetchone()
+    
+    if not product:
+        await query.answer("Товар не найден")
+        cur.close()
+        conn.close()
+        return
+    
+    if product['stock'] <= 0:
+        await query.answer("Нет в наличии!")
+        cur.close()
+        conn.close()
+        return
+    
+    # Списываем 1 штуку
+    cur.execute("UPDATE products SET stock = stock - 1, sold = sold + 1 WHERE id = %s", (product_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    await query.answer(f"✅ Продано! Осталось: {product['stock'] - 1} шт.")
 
 async def show_catalog(query, page=0):
     conn = get_db_connection()
@@ -215,11 +287,11 @@ async def show_product(query, product_id):
         [InlineKeyboardButton("🔙 Назад", callback_data="catalog")],
     ]
     
+    desc = f"\n📝 _{product['description']}_" if product['description'] else ""
     await query.edit_message_text(
         f"📦 *{product['name']}*\n\n"
         f"💰 Цена: *{product['price']} ₽*\n"
-        f"📦 В наличии: *{product['stock']} шт.*\n"
-        f"📝 _{product['description']}_" if product['description'] else "",
+        f"📦 В наличии: *{product['stock']} шт.*{desc}",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -276,6 +348,7 @@ async def show_edit_menu(query, product_id):
     conn.close()
     
     keyboard = [
+        [InlineKeyboardButton("🛒 Продать (-1)", callback_data=f"sell_{product_id}")],
         [InlineKeyboardButton("📦 Пополнить (+)", callback_data=f"restock_{product_id}")],
         [InlineKeyboardButton("❌ Удалить", callback_data=f"delete_product_{product_id}")],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_products")],
@@ -344,8 +417,10 @@ async def show_messages(query):
     
     text = "💬 *Последние сообщения:*\n\n"
     for msg in messages:
-        prefix = "👤 Клиент" if not msg['from_admin'] else "🤵 Ты"
-        text += f"{prefix}: {msg['message'][:50]}\n"
+        prefix = "🤵 Ты → Клиент" if msg['from_admin'] else "👤 Клиент"
+        text += f"{prefix} (ID {msg['client_id']}): {msg['message'][:50]}\n"
+    
+    text += "\n_Для ответа: `/reply ID текст`_"
     
     await query.edit_message_text(text, reply_markup=get_admin_keyboard(), parse_mode='Markdown')
 
@@ -428,10 +503,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
         conn.close()
         
-        # Уведомляем админа
         await context.bot.send_message(
             ADMIN_ID,
-            f"💬 *Сообщение от клиента* (ID: {user_id}):\n\n{text}",
+            f"💬 *Сообщение от клиента* (ID: {user_id}):\n\n{text}\n\n_Ответить: `/reply {user_id} текст`_",
             parse_mode='Markdown'
         )
         
@@ -454,12 +528,12 @@ def main():
     
     app_telegram = Application.builder().token(TOKEN).build()
     app_telegram.add_handler(CommandHandler("start", start))
+    app_telegram.add_handler(CommandHandler("reply", reply_command))
     app_telegram.add_handler(CallbackQueryHandler(button_handler))
     app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     logger.info("Бот для продаж запущен!")
     
-    # Flask в отдельном потоке
     import threading
     def run_flask():
         port = int(os.environ.get('PORT', 10000))
