@@ -57,7 +57,6 @@ def init_db():
             amount INTEGER NOT NULL DEFAULT 0,
             returned BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(debtor_name)
         );
     """)
     
