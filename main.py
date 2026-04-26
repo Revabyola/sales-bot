@@ -49,6 +49,18 @@ def init_db():
         );
     """)
     
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS debts (
+            id SERIAL PRIMARY KEY,
+            product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
+            debtor_name TEXT NOT NULL,
+            amount INTEGER NOT NULL DEFAULT 0,
+            returned BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(debtor_name)
+        );
+    """)
+    
     conn.commit()
     cur.close()
     conn.close()
@@ -68,6 +80,7 @@ def get_admin_keyboard():
         [InlineKeyboardButton("📋 Мои товары", callback_data="my_products")],
         [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton("💬 Сообщения от клиентов", callback_data="messages")],
+        [InlineKeyboardButton("📝 Долги", callback_data="debts_list")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -180,6 +193,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "stats":
         await show_stats(query)
     
+    # --- Долги ---
+    elif data.startswith("debt_"):
+        product_id = int(data.replace("debt_", ""))
+        context.user_data['debt_product_id'] = product_id
+        context.user_data['awaiting'] = 'debt_name'
+        await query.edit_message_text("👤 Введи *имя должника*:", parse_mode='Markdown')
+    elif data == "debts_list":
+        await show_debts(query)
+    elif data.startswith("return_debt_"):
+        debt_id = int(data.replace("return_debt_", ""))
+        await return_debt(query, debt_id)
+    
     # --- Сообщения ---
     elif data == "messages":
         await show_messages(query)
@@ -221,6 +246,7 @@ async def sell_product(query, product_id):
     keyboard = [
         [InlineKeyboardButton("🛒 Продать (-1)", callback_data=f"sell_{product_id}")],
         [InlineKeyboardButton("📦 Пополнить (+)", callback_data=f"restock_{product_id}")],
+        [InlineKeyboardButton("📝 Дать в долг", callback_data=f"debt_{product_id}")],
         [InlineKeyboardButton("💰 Изменить цену", callback_data=f"change_price_{product_id}")],
         [InlineKeyboardButton("📋 Изменить кол-во", callback_data=f"change_stock_{product_id}")],
         [InlineKeyboardButton("📊 Изменить продано", callback_data=f"change_sold_{product_id}")],
@@ -340,6 +366,7 @@ async def show_edit_menu(query, product_id):
     keyboard = [
         [InlineKeyboardButton("🛒 Продать (-1)", callback_data=f"sell_{product_id}")],
         [InlineKeyboardButton("📦 Пополнить (+)", callback_data=f"restock_{product_id}")],
+        [InlineKeyboardButton("📝 Дать в долг", callback_data=f"debt_{product_id}")],
         [InlineKeyboardButton("💰 Изменить цену", callback_data=f"change_price_{product_id}")],
         [InlineKeyboardButton("📋 Изменить кол-во", callback_data=f"change_stock_{product_id}")],
         [InlineKeyboardButton("📊 Изменить продано", callback_data=f"change_sold_{product_id}")],
@@ -383,6 +410,9 @@ async def show_stats(query):
     cur.execute("SELECT COALESCE(SUM(sold * price), 0) as total_revenue FROM products")
     total_revenue = cur.fetchone()['total_revenue']
     
+    cur.execute("SELECT COALESCE(SUM(amount), 0) as total_debt FROM debts WHERE returned = FALSE")
+    total_debt = cur.fetchone()['total_debt']
+    
     cur.close()
     conn.close()
     
@@ -391,10 +421,62 @@ async def show_stats(query):
         f"📦 Всего товаров: *{total_products}*\n"
         f"📋 Остаток: *{total_stock} шт.*\n"
         f"🛒 Продано: *{total_sold} шт.*\n"
-        f"💰 Выручка: *{total_revenue} Br*",
+        f"💰 Выручка: *{total_revenue} Br*\n"
+        f"📝 В долгу: *{total_debt} шт.*",
         reply_markup=get_admin_keyboard(),
         parse_mode='Markdown'
     )
+
+# --- Долги ---
+async def show_debts(query):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT d.*, p.name as product_name, p.price 
+        FROM debts d 
+        JOIN products p ON d.product_id = p.id 
+        ORDER BY d.created_at DESC
+    """)
+    debts = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    if not debts:
+        await query.edit_message_text("📝 Нет долгов.", reply_markup=get_admin_keyboard())
+        return
+    
+    text = "📝 *Долги:*\n\n"
+    keyboard = []
+    total_debt = 0
+    
+    for d in debts:
+        status = "✅" if d['returned'] else "❌"
+        text += f"{status} *{d['debtor_name']}*: {d['amount']} шт. {d['product_name']} ({d['amount'] * d['price']} Br)\n"
+        if not d['returned']:
+            total_debt += d['amount'] * d['price']
+            keyboard.append([
+                InlineKeyboardButton(f"✅ Вернул: {d['debtor_name']}", callback_data=f"return_debt_{d['id']}")
+            ])
+    
+    text += f"\n💰 *Общая сумма долга: {total_debt} Br*"
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def return_debt(query, debt_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE debts SET returned = TRUE WHERE id = %s", (debt_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    await query.answer("✅ Долг погашен!")
+    await show_debts(query)
 
 async def show_messages(query):
     conn = get_db_connection()
@@ -536,6 +618,61 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             await update.message.reply_text(
                 f"✅ Количество проданных изменено на *{sold} шт.*!",
+                reply_markup=get_admin_keyboard(),
+                parse_mode='Markdown'
+            )
+        except:
+            await update.message.reply_text("❌ Введи число!")
+    
+    # Админ: долг - имя
+    elif user_id == ADMIN_ID and awaiting == 'debt_name':
+        context.user_data['debt_name'] = text.strip()
+        context.user_data['awaiting'] = 'debt_amount'
+        await update.message.reply_text("📦 Сколько штук в долг?", parse_mode='Markdown')
+    
+    # Админ: долг - количество
+    elif user_id == ADMIN_ID and awaiting == 'debt_amount':
+        try:
+            amount = int(text)
+            product_id = context.user_data['debt_product_id']
+            debtor = context.user_data['debt_name']
+            
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+            product = cur.fetchone()
+            
+            if product['stock'] < amount:
+                await update.message.reply_text(f"❌ Недостаточно! В наличии: {product['stock']} шт.")
+                context.user_data.clear()
+                cur.close()
+                conn.close()
+                return
+            
+            # Списываем товар (НЕ добавляем к sold!)
+            cur.execute("UPDATE products SET stock = stock - %s WHERE id = %s", (amount, product_id))
+            
+            # Проверяем, есть ли уже долг для этого человека
+            cur.execute("SELECT * FROM debts WHERE debtor_name = %s AND returned = FALSE", (debtor,))
+            existing = cur.fetchone()
+            
+            if existing:
+                # Увеличиваем существующий долг
+                cur.execute("UPDATE debts SET amount = amount + %s WHERE id = %s", (amount, existing['id']))
+            else:
+                # Создаём новый долг
+                cur.execute(
+                    "INSERT INTO debts (product_id, debtor_name, amount) VALUES (%s, %s, %s)",
+                    (product_id, debtor, amount)
+                )
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            context.user_data.clear()
+            await update.message.reply_text(
+                f"✅ *{debtor}* взял в долг *{amount} шт.* {product['name']}",
                 reply_markup=get_admin_keyboard(),
                 parse_mode='Markdown'
             )
