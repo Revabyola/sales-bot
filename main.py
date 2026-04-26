@@ -113,47 +113,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
 
-# --- Ответ клиенту ---
-async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id != ADMIN_ID:
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "❌ Используй формат:\n`/reply ID текст`\n\n"
-            "Например: `/reply 123456789 Ваш заказ готов!`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        client_id = int(context.args[0])
-        reply_text = ' '.join(context.args[1:])
-        
-        # Сохраняем в БД
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO chat_messages (client_id, message, from_admin) VALUES (%s, %s, TRUE)",
-            (client_id, reply_text)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-        # Отправляем клиенту
-        await context.bot.send_message(
-            client_id,
-            f"📩 *Ответ от продавца:*\n\n{reply_text}",
-            parse_mode='Markdown'
-        )
-        
-        await update.message.reply_text(f"✅ Ответ отправлен клиенту {client_id}!")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-
 # --- Обработчик кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -161,7 +120,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
     
-    # --- КЛИЕНТ И АДМИН: Каталог ---
+    # --- Каталог ---
     if data == "catalog":
         await show_catalog(query, page=0)
     
@@ -185,7 +144,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back":
         await start(update, context)
     
-    # --- АДМИН ---
+    # --- Админ: товары ---
     elif data == "add_product":
         context.user_data['awaiting'] = 'product_name'
         await query.edit_message_text("✏️ Введи *название товара*:", parse_mode='Markdown')
@@ -218,8 +177,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "stats":
         await show_stats(query)
     
+    # --- Сообщения ---
     elif data == "messages":
         await show_messages(query)
+    
+    elif data.startswith("reply_to_"):
+        client_id = int(data.replace("reply_to_", ""))
+        context.user_data['reply_client_id'] = client_id
+        context.user_data['awaiting'] = 'reply_text'
+        await query.edit_message_text(
+            f"✏️ Введи *текст ответа* для клиента {client_id}:",
+            parse_mode='Markdown'
+        )
 
 # --- Продажа товара ---
 async def sell_product(query, product_id):
@@ -240,7 +209,6 @@ async def sell_product(query, product_id):
         conn.close()
         return
     
-    # Списываем 1 штуку
     cur.execute("UPDATE products SET stock = stock - 1, sold = sold + 1 WHERE id = %s", (product_id,))
     conn.commit()
     cur.close()
@@ -296,7 +264,7 @@ async def show_product(query, product_id):
         parse_mode='Markdown'
     )
 
-# --- АДМИН: Управление товарами ---
+# --- Админ: управление товарами ---
 async def show_admin_products(query, page=0):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -406,7 +374,7 @@ async def show_stats(query):
 async def show_messages(query):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT * FROM chat_messages ORDER BY created_at DESC LIMIT 10")
+    cur.execute("SELECT * FROM chat_messages WHERE from_admin = FALSE ORDER BY created_at DESC")
     messages = cur.fetchall()
     cur.close()
     conn.close()
@@ -415,14 +383,30 @@ async def show_messages(query):
         await query.edit_message_text("💬 Нет сообщений.", reply_markup=get_admin_keyboard())
         return
     
-    text = "💬 *Последние сообщения:*\n\n"
+    clients = {}
     for msg in messages:
-        prefix = "🤵 Ты → Клиент" if msg['from_admin'] else "👤 Клиент"
-        text += f"{prefix} (ID {msg['client_id']}): {msg['message'][:50]}\n"
+        if msg['client_id'] not in clients:
+            clients[msg['client_id']] = msg
     
-    text += "\n_Для ответа: `/reply ID текст`_"
+    text = "💬 *Сообщения от клиентов:*\n\n"
+    keyboard = []
     
-    await query.edit_message_text(text, reply_markup=get_admin_keyboard(), parse_mode='Markdown')
+    for client_id, msg in list(clients.items())[:8]:
+        text += f"👤 *{client_id}*: {msg['message'][:40]}...\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"✏️ Ответить {client_id}", 
+                callback_data=f"reply_to_{client_id}"
+            )
+        ])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
 
 # --- Обработчик текста ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -470,6 +454,41 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text("❌ Введи число!")
     
+    # Админ: ответ клиенту
+    elif user_id == ADMIN_ID and awaiting == 'reply_text':
+        client_id = context.user_data.get('reply_client_id')
+        reply_text = text
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO chat_messages (client_id, message, from_admin) VALUES (%s, %s, TRUE)",
+            (client_id, reply_text)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        try:
+            await context.bot.send_message(
+                client_id,
+                f"📩 *Ответ от продавца:*\n\n{reply_text}",
+                parse_mode='Markdown'
+            )
+            await update.message.reply_text(
+                f"✅ Ответ отправлен клиенту {client_id}!",
+                reply_markup=get_admin_keyboard(),
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Не удалось отправить: {e}",
+                reply_markup=get_admin_keyboard()
+            )
+        
+        context.user_data.clear()
+    
+    # Админ: пополнение товара
     elif user_id == ADMIN_ID and awaiting == 'restock_amount':
         try:
             amount = int(text)
@@ -505,7 +524,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await context.bot.send_message(
             ADMIN_ID,
-            f"💬 *Сообщение от клиента* (ID: {user_id}):\n\n{text}\n\n_Ответить: `/reply {user_id} текст`_",
+            f"💬 *Сообщение от клиента* (ID: {user_id}):\n\n{text}",
             parse_mode='Markdown'
         )
         
@@ -528,7 +547,6 @@ def main():
     
     app_telegram = Application.builder().token(TOKEN).build()
     app_telegram.add_handler(CommandHandler("start", start))
-    app_telegram.add_handler(CommandHandler("reply", reply_command))
     app_telegram.add_handler(CallbackQueryHandler(button_handler))
     app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
