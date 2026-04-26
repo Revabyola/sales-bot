@@ -633,7 +633,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Админ: долг - количество
     elif user_id == ADMIN_ID and awaiting == 'debt_amount':
         try:
-            amount = int(text)
+            text = text.strip().replace(',', '.')
+            amount = int(float(text))
             product_id = context.user_data['debt_product_id']
             debtor = context.user_data['debt_name']
             
