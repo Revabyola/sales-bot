@@ -274,22 +274,35 @@ async def delete_product(query, pid):
 
 async def show_stats(query):
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT COUNT(*) as total FROM products WHERE active=TRUE")
-    total = cur.fetchone()['total']
+    cur = conn.cursor()  # БЕЗ RealDictCursor!
+    
+    cur.execute("SELECT COUNT(*) FROM products WHERE active=TRUE")
+    total = cur.fetchone()[0]
+    
     cur.execute("SELECT COALESCE(SUM(stock),0) FROM products WHERE active=TRUE")
     stock = cur.fetchone()[0]
+    
     cur.execute("SELECT COALESCE(SUM(sold),0) FROM products")
     sold = cur.fetchone()[0]
+    
     cur.execute("SELECT COALESCE(SUM(sold*price),0) FROM products")
     rev = cur.fetchone()[0]
+    
     cur.execute("SELECT COALESCE(SUM(d.amount*p.price),0) FROM debts d JOIN products p ON d.product_id=p.id WHERE d.returned=FALSE")
     debt = cur.fetchone()[0]
+    
     cur.close()
     conn.close()
+    
     await query.edit_message_text(
-        f"📊 *Статистика:*\n\n📦 Товаров: *{total}*\n📋 Остаток: *{stock} шт.*\n🛒 Продано: *{sold} шт.*\n💰 Выручка: *{rev} Br*\n📝 В долгу: *{debt} Br*",
-        reply_markup=get_admin_keyboard(), parse_mode='Markdown'
+        f"📊 *Статистика:*\n\n"
+        f"📦 Всего товаров: *{total}*\n"
+        f"📋 Остаток: *{stock} шт.*\n"
+        f"🛒 Продано: *{sold} шт.*\n"
+        f"💰 Выручка: *{rev} Br*\n"
+        f"📝 В долгу: *{debt} Br*",
+        reply_markup=get_admin_keyboard(),
+        parse_mode='Markdown'
     )
 
 async def show_debts(query):
