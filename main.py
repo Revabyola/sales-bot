@@ -18,6 +18,10 @@ CORS(app)
 DATABASE_URL = os.environ.get('DATABASE_URL')
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN2_ID = int(os.environ.get("ADMIN2_ID", "0"))
+
+def is_admin(uid):
+    return uid == ADMIN_ID or uid == ADMIN2_ID
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
@@ -27,38 +31,19 @@ def init_db():
     cur = conn.cursor()
     
     cur.execute("CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, name TEXT, price REAL, cost REAL DEFAULT 0, stock INT DEFAULT 0, sold INT DEFAULT 0, active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id SERIAL PRIMARY KEY,
-            client_id BIGINT,
-            client_name TEXT,
-            message TEXT,
-            from_admin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
+    cur.execute("CREATE TABLE IF NOT EXISTS chat_messages (id SERIAL PRIMARY KEY, client_id BIGINT, client_name TEXT, message TEXT, from_admin BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     cur.execute("CREATE TABLE IF NOT EXISTS debts (id SERIAL PRIMARY KEY, product_id INT REFERENCES products(id), debtor_name TEXT, amount INT DEFAULT 0, returned BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     cur.execute("CREATE TABLE IF NOT EXISTS sales_history (id SERIAL PRIMARY KEY, product_name TEXT, price REAL, cost REAL DEFAULT 0, payment_method TEXT DEFAULT '💵 Наличные', sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     
-    try:
-        cur.execute("ALTER TABLE debts DROP CONSTRAINT IF EXISTS debts_debtor_name_key")
-        conn.commit()
+    try: cur.execute("ALTER TABLE debts DROP CONSTRAINT IF EXISTS debts_debtor_name_key"); conn.commit()
     except: pass
-    try:
-        cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0")
-        conn.commit()
+    try: cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0"); conn.commit()
     except: pass
-    try:
-        cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0")
-        conn.commit()
+    try: cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0"); conn.commit()
     except: pass
-    try:
-        cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT '💵 Наличные'")
-        conn.commit()
+    try: cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT '💵 Наличные'"); conn.commit()
     except: pass
-    try:
-        cur.execute("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS client_name TEXT")
-        conn.commit()
+    try: cur.execute("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS client_name TEXT"); conn.commit()
     except: pass
     
     conn.commit()
@@ -86,6 +71,12 @@ def get_admin_keyboard():
         [InlineKeyboardButton("📝 Долги", callback_data="debts_list")],
     ])
 
+def get_admin2_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛍 Каталог товаров", callback_data="catalog")],
+        [InlineKeyboardButton("💬 Сообщения от клиентов", callback_data="messages")],
+    ])
+
 def get_catalog_keyboard(products, page=0):
     keyboard = []
     per_page = 5
@@ -105,9 +96,17 @@ def get_catalog_keyboard(products, page=0):
 
 async def start(update, ctx):
     uid = update.effective_user.id
-    is_admin = uid == ADMIN_ID
-    text = "🔐 *Админ-панель*" if is_admin else "👋 *Добро пожаловать!*"
-    keyboard = get_admin_keyboard() if is_admin else get_client_keyboard()
+    
+    if uid == ADMIN_ID:
+        text = "🔐 *Админ-панель*\n\nВыбери действие:"
+        keyboard = get_admin_keyboard()
+    elif uid == ADMIN2_ID:
+        text = "🔐 *Панель помощника*\n\nВыбери действие:"
+        keyboard = get_admin2_keyboard()
+    else:
+        text = "👋 *Добро пожаловать!*\n\nЯ бот для заказа товаров.\nВыбери действие:"
+        keyboard = get_client_keyboard()
+    
     if update.message:
         await update.message.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
     elif update.callback_query:
@@ -322,18 +321,10 @@ async def return_debt(q, did):
     await q.answer("✅ Погашен!")
     await show_debts(q)
 
-# --- НОВАЯ СИСТЕМА ЧАТОВ ---
 async def show_chat_list(q):
-    """Показывает список чатов с клиентами."""
     conn = get_db_connection()
     cur = conn.cursor()
-    # Получаем уникальных клиентов с их последними сообщениями
-    cur.execute("""
-        SELECT DISTINCT ON (client_id) client_id, client_name, message, created_at
-        FROM chat_messages
-        WHERE from_admin = FALSE
-        ORDER BY client_id, created_at DESC
-    """)
+    cur.execute("SELECT DISTINCT ON (client_id) client_id, client_name, message, created_at FROM chat_messages WHERE from_admin = FALSE ORDER BY client_id, created_at DESC")
     chats = cur.fetchall(); cur.close()
     
     if not chats:
@@ -353,7 +344,6 @@ async def show_chat_list(q):
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def show_chat_messages(q, cid):
-    """Показывает историю сообщений с конкретным клиентом."""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT client_name, message, from_admin, created_at FROM chat_messages WHERE client_id = %s ORDER BY created_at ASC", (cid,))
@@ -381,14 +371,12 @@ async def handle_text(update, ctx):
     text = update.message.text.strip()
     awaiting = ctx.user_data.get('awaiting')
     
-    if uid != ADMIN_ID:
-        # Сохраняем имя пользователя
+    if not is_admin(uid):
+        # Клиент
         user = update.effective_user
         client_name = user.first_name or ""
-        if user.last_name:
-            client_name += f" {user.last_name}"
-        if user.username:
-            client_name += f" (@{user.username})"
+        if user.last_name: client_name += f" {user.last_name}"
+        if user.username: client_name += f" (@{user.username})"
         
         conn = get_db_connection()
         cur = conn.cursor()
@@ -396,9 +384,15 @@ async def handle_text(update, ctx):
         conn.commit(); cur.close()
         
         await update.message.reply_text("✅ Отправлено!", reply_markup=get_client_keyboard())
-        await ctx.bot.send_message(ADMIN_ID, f"💬 *{client_name}*:\n\n{text}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_{uid}")]]), parse_mode='Markdown')
+        
+        # Отправляем обоим админам
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_{uid}")]])
+        await ctx.bot.send_message(ADMIN_ID, f"💬 *{client_name}*:\n\n{text}", reply_markup=kb, parse_mode='Markdown')
+        if ADMIN2_ID:
+            await ctx.bot.send_message(ADMIN2_ID, f"💬 *{client_name}*:\n\n{text}", reply_markup=kb, parse_mode='Markdown')
         return
     
+    # Админы
     try:
         if awaiting == 'product_name':
             ctx.user_data['product_name'] = text
@@ -419,7 +413,7 @@ async def handle_text(update, ctx):
             conn.commit(); cur.close(); conn.close()
             name = ctx.user_data['product_name']
             ctx.user_data.clear()
-            await update.message.reply_text(f"✅ *{name}* добавлен!", reply_markup=get_admin_keyboard(), parse_mode='Markdown')
+            await update.message.reply_text(f"✅ *{name}* добавлен!", reply_markup=get_admin_keyboard() if uid == ADMIN_ID else get_admin2_keyboard(), parse_mode='Markdown')
         elif awaiting == 'change_price':
             conn = get_db_connection()
             cur = conn.cursor()
