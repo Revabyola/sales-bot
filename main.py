@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -54,6 +54,12 @@ def init_db():
 def to_num(text, as_int=True):
     text = str(text).strip().replace(',', '.')
     return int(float(text)) if as_int else float(text)
+
+def local_time(dt):
+    """Прибавляет 3 часа к UTC."""
+    if dt:
+        return (dt + timedelta(hours=3)).strftime('%d.%m.%Y %H:%M')
+    return ''
 
 def get_client_keyboard():
     return InlineKeyboardMarkup([
@@ -297,7 +303,7 @@ async def show_debts(q):
     text, kb, total = "📝 *Долги:*\n\n", [], 0
     for d in debts:
         did, name, amt, ret, pname, price, dt = d
-        dt_str = dt.strftime('%d.%m.%Y %H:%M') if dt else ''
+        dt_str = local_time(dt)
         if not ret:
             total += amt * price
             text += f"❌ *{name}*: {amt} шт. {pname} ({amt * price} Br)\n📅 {dt_str}\n\n"
@@ -336,7 +342,7 @@ async def show_chat_list(q):
     for chat in chats:
         cid, cname, msg, dt = chat
         name = cname or f"ID: {cid}"
-        dt_str = dt.strftime('%d.%m %H:%M') if dt else ''
+        dt_str = local_time(dt)
         text += f"👤 *{name}*: {msg[:30]}...\n📅 {dt_str}\n\n"
         kb.append([InlineKeyboardButton(f"💬 {name}", callback_data=f"chat_{cid}")])
     
@@ -357,7 +363,7 @@ async def show_chat_messages(q, cid):
     text = f"💬 *Чат с {cname}:*\n\n"
     for name, msg, from_admin, dt in msgs:
         prefix = "🤵 Ты" if from_admin else f"👤 {cname}"
-        dt_str = dt.strftime('%d.%m %H:%M') if dt else ''
+        dt_str = local_time(dt)
         text += f"{prefix} [{dt_str}]:\n{msg}\n\n"
     
     kb = [
@@ -372,7 +378,6 @@ async def handle_text(update, ctx):
     awaiting = ctx.user_data.get('awaiting')
     
     if not is_admin(uid):
-        # Клиент
         user = update.effective_user
         client_name = user.first_name or ""
         if user.last_name: client_name += f" {user.last_name}"
@@ -385,14 +390,12 @@ async def handle_text(update, ctx):
         
         await update.message.reply_text("✅ Отправлено!", reply_markup=get_client_keyboard())
         
-        # Отправляем обоим админам
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_{uid}")]])
         await ctx.bot.send_message(ADMIN_ID, f"💬 *{client_name}*:\n\n{text}", reply_markup=kb, parse_mode='Markdown')
         if ADMIN2_ID:
             await ctx.bot.send_message(ADMIN2_ID, f"💬 *{client_name}*:\n\n{text}", reply_markup=kb, parse_mode='Markdown')
         return
     
-    # Админы
     try:
         if awaiting == 'product_name':
             ctx.user_data['product_name'] = text
@@ -413,7 +416,8 @@ async def handle_text(update, ctx):
             conn.commit(); cur.close(); conn.close()
             name = ctx.user_data['product_name']
             ctx.user_data.clear()
-            await update.message.reply_text(f"✅ *{name}* добавлен!", reply_markup=get_admin_keyboard() if uid == ADMIN_ID else get_admin2_keyboard(), parse_mode='Markdown')
+            kb = get_admin_keyboard() if uid == ADMIN_ID else get_admin2_keyboard()
+            await update.message.reply_text(f"✅ *{name}* добавлен!", reply_markup=kb, parse_mode='Markdown')
         elif awaiting == 'change_price':
             conn = get_db_connection()
             cur = conn.cursor()
