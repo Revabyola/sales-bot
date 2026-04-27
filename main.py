@@ -26,74 +26,40 @@ def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            price REAL NOT NULL,
-            cost REAL DEFAULT 0,
-            stock INTEGER NOT NULL DEFAULT 0,
-            sold INTEGER NOT NULL DEFAULT 0,
-            active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    
+    cur.execute("CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, name TEXT, price REAL, cost REAL DEFAULT 0, stock INT DEFAULT 0, sold INT DEFAULT 0, active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_messages (
             id SERIAL PRIMARY KEY,
-            client_id BIGINT NOT NULL,
-            message TEXT NOT NULL,
+            client_id BIGINT,
+            client_name TEXT,
+            message TEXT,
             from_admin BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS debts (
-            id SERIAL PRIMARY KEY,
-            product_id INTEGER REFERENCES products(id) ON DELETE CASCADE,
-            debtor_name TEXT NOT NULL,
-            amount INTEGER NOT NULL DEFAULT 0,
-            returned BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sales_history (
-            id SERIAL PRIMARY KEY,
-            product_name TEXT NOT NULL,
-            price REAL NOT NULL,
-            cost REAL DEFAULT 0,
-            payment_method TEXT DEFAULT '💵 Наличные',
-            sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
+    cur.execute("CREATE TABLE IF NOT EXISTS debts (id SERIAL PRIMARY KEY, product_id INT REFERENCES products(id), debtor_name TEXT, amount INT DEFAULT 0, returned BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    cur.execute("CREATE TABLE IF NOT EXISTS sales_history (id SERIAL PRIMARY KEY, product_name TEXT, price REAL, cost REAL DEFAULT 0, payment_method TEXT DEFAULT '💵 Наличные', sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     
     try:
         cur.execute("ALTER TABLE debts DROP CONSTRAINT IF EXISTS debts_debtor_name_key")
         conn.commit()
-    except:
-        pass
-    
+    except: pass
     try:
         cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0")
         conn.commit()
-    except:
-        pass
-    
+    except: pass
     try:
         cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0")
         conn.commit()
-    except:
-        pass
-    
+    except: pass
     try:
         cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT '💵 Наличные'")
         conn.commit()
-    except:
-        pass
+    except: pass
+    try:
+        cur.execute("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS client_name TEXT")
+        conn.commit()
+    except: pass
     
     conn.commit()
     cur.close()
@@ -140,7 +106,7 @@ def get_catalog_keyboard(products, page=0):
 async def start(update, ctx):
     uid = update.effective_user.id
     is_admin = uid == ADMIN_ID
-    text = "🔐 *Админ-панель*\n\nВыбери действие:" if is_admin else "👋 *Добро пожаловать!*\n\nЯ бот для заказа товаров.\nВыбери действие:"
+    text = "🔐 *Админ-панель*" if is_admin else "👋 *Добро пожаловать!*"
     keyboard = get_admin_keyboard() if is_admin else get_client_keyboard()
     if update.message:
         await update.message.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
@@ -201,11 +167,12 @@ async def button_handler(update, ctx):
     elif d == "debts_list": await show_debts(q)
     elif d.startswith("return_debt_"): await return_debt(q, int(d.split("_")[-1]))
     
-    elif d == "messages": await show_messages(q)
-    elif d.startswith("reply_to_"):
+    elif d == "messages": await show_chat_list(q)
+    elif d.startswith("chat_"): await show_chat_messages(q, int(d.split("_")[-1]))
+    elif d.startswith("reply_"):
         ctx.user_data['reply_client_id'] = int(d.split("_")[-1])
         ctx.user_data['awaiting'] = 'reply_text'
-        await q.edit_message_text(f"✏️ Введи *текст ответа* для клиента {d.split('_')[-1]}:", parse_mode='Markdown')
+        await q.edit_message_text(f"✏️ Введи *текст ответа*:", parse_mode='Markdown')
 
 async def choose_payment(q, pid):
     kb = [
@@ -220,20 +187,14 @@ async def sell_product(q, pid, method):
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT * FROM products WHERE id=%s", (pid,))
     p = cur.fetchone()
-    
     if not p or p['stock'] <= 0:
         await q.answer("❌ Нет в наличии!")
-        cur.close()
-        conn.close()
+        cur.close(); conn.close()
         return
-    
     cost = p.get('cost', 0) or 0
     cur.execute("UPDATE products SET stock=stock-1, sold=sold+1 WHERE id=%s", (pid,))
     cur.execute("INSERT INTO sales_history (product_name, price, cost, payment_method) VALUES (%s, %s, %s, %s)", (p['name'], p['price'], cost, method))
-    conn.commit()
-    cur.close()
-    conn.close()
-    
+    conn.commit(); cur.close(); conn.close()
     await q.answer(f"✅ Продано! ({method})")
     await show_edit_menu(q, pid)
 
@@ -302,14 +263,7 @@ async def show_stats(q):
     profit = rev - total_cost
     cur.close(); conn.close()
     await q.edit_message_text(
-        f"📊 *Статистика:*\n\n"
-        f"📦 Товаров: *{total}*\n"
-        f"📋 Остаток: *{stock} шт.*\n"
-        f"🛒 Продано: *{sold} шт.*\n"
-        f"💰 Выручка: *{rev} Br*\n"
-        f"📊 Затраты: *{total_cost} Br*\n"
-        f"📈 Прибыль: *{profit} Br*\n"
-        f"📝 В долгу: *{debt} Br*",
+        f"📊 *Статистика:*\n\n📦 Товаров: *{total}*\n📋 Остаток: *{stock} шт.*\n🛒 Продано: *{sold} шт.*\n💰 Выручка: *{rev} Br*\n📊 Затраты: *{total_cost} Br*\n📈 Прибыль: *{profit} Br*\n📝 В долгу: *{debt} Br*",
         reply_markup=get_admin_keyboard(), parse_mode='Markdown'
     )
 
@@ -326,17 +280,13 @@ async def show_history(q):
 async def show_day_stats(q, day):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT product_name, payment_method, COUNT(*), SUM(price), SUM(cost) FROM sales_history WHERE DATE(sold_at)=%s GROUP BY product_name, payment_method ORDER BY product_name", (day,))
+    cur.execute("SELECT product_name, payment_method, COUNT(*), SUM(price), SUM(cost) FROM sales_history WHERE DATE(sold_at)=%s GROUP BY product_name, payment_method", (day,))
     items = cur.fetchall(); cur.close()
-    text = f"📅 *Продажи за {day}:*\n\n"
-    total, total_cost = 0, 0
+    text = f"📅 *Продажи за {day}:*\n\n"; total, tc = 0, 0
     for name, method, cnt, sm, cst in items:
-        cst = cst or 0
+        cst = cst or 0; total += sm; tc += cst
         text += f"• {name} ({method}): {cnt} шт. ({sm} Br)\n"
-        total += sm
-        total_cost += cst
-    profit = total - total_cost
-    text += f"\n💰 Выручка: *{total} Br*\n📊 Затраты: *{total_cost} Br*\n📈 Прибыль: *{profit} Br*"
+    text += f"\n💰 Выручка: *{total} Br*\n📊 Затраты: *{tc} Br*\n📈 Прибыль: *{total - tc} Br*"
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="history")]]), parse_mode='Markdown')
 
 async def show_debts(q):
@@ -372,20 +322,58 @@ async def return_debt(q, did):
     await q.answer("✅ Погашен!")
     await show_debts(q)
 
-async def show_messages(q):
+# --- НОВАЯ СИСТЕМА ЧАТОВ ---
+async def show_chat_list(q):
+    """Показывает список чатов с клиентами."""
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT * FROM chat_messages WHERE from_admin=FALSE ORDER BY created_at DESC")
-    msgs = cur.fetchall(); cur.close()
-    if not msgs: await q.edit_message_text("💬 Нет сообщений.", reply_markup=get_admin_keyboard()); return
-    seen, kb = set(), []
-    text = "💬 *Сообщения:*\n\n"
-    for m in msgs:
-        if m['client_id'] not in seen:
-            seen.add(m['client_id'])
-            text += f"👤 *{m['client_id']}*: {m['message'][:40]}...\n"
-            kb.append([InlineKeyboardButton(f"✏️ Ответить {m['client_id']}", callback_data=f"reply_to_{m['client_id']}")])
+    cur = conn.cursor()
+    # Получаем уникальных клиентов с их последними сообщениями
+    cur.execute("""
+        SELECT DISTINCT ON (client_id) client_id, client_name, message, created_at
+        FROM chat_messages
+        WHERE from_admin = FALSE
+        ORDER BY client_id, created_at DESC
+    """)
+    chats = cur.fetchall(); cur.close()
+    
+    if not chats:
+        await q.edit_message_text("💬 Нет сообщений.", reply_markup=get_admin_keyboard())
+        return
+    
+    text = "💬 *Чаты с клиентами:*\n\n"
+    kb = []
+    for chat in chats:
+        cid, cname, msg, dt = chat
+        name = cname or f"ID: {cid}"
+        dt_str = dt.strftime('%d.%m %H:%M') if dt else ''
+        text += f"👤 *{name}*: {msg[:30]}...\n📅 {dt_str}\n\n"
+        kb.append([InlineKeyboardButton(f"💬 {name}", callback_data=f"chat_{cid}")])
+    
     kb.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+async def show_chat_messages(q, cid):
+    """Показывает историю сообщений с конкретным клиентом."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT client_name, message, from_admin, created_at FROM chat_messages WHERE client_id = %s ORDER BY created_at ASC", (cid,))
+    msgs = cur.fetchall(); cur.close()
+    
+    if not msgs:
+        await q.edit_message_text("💬 Нет сообщений.", reply_markup=get_admin_keyboard())
+        return
+    
+    cname = msgs[0][0] or f"ID: {cid}"
+    text = f"💬 *Чат с {cname}:*\n\n"
+    for name, msg, from_admin, dt in msgs:
+        prefix = "🤵 Ты" if from_admin else f"👤 {cname}"
+        dt_str = dt.strftime('%d.%m %H:%M') if dt else ''
+        text += f"{prefix} [{dt_str}]:\n{msg}\n\n"
+    
+    kb = [
+        [InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_{cid}")],
+        [InlineKeyboardButton("🔙 К списку чатов", callback_data="messages")],
+    ]
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def handle_text(update, ctx):
@@ -394,12 +382,21 @@ async def handle_text(update, ctx):
     awaiting = ctx.user_data.get('awaiting')
     
     if uid != ADMIN_ID:
+        # Сохраняем имя пользователя
+        user = update.effective_user
+        client_name = user.first_name or ""
+        if user.last_name:
+            client_name += f" {user.last_name}"
+        if user.username:
+            client_name += f" (@{user.username})"
+        
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT INTO chat_messages (client_id, message) VALUES (%s, %s)", (uid, text))
+        cur.execute("INSERT INTO chat_messages (client_id, client_name, message) VALUES (%s, %s, %s)", (uid, client_name, text))
         conn.commit(); cur.close()
+        
         await update.message.reply_text("✅ Отправлено!", reply_markup=get_client_keyboard())
-        await ctx.bot.send_message(ADMIN_ID, f"💬 *Клиент {uid}:*\n{text}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_to_{uid}")]]), parse_mode='Markdown')
+        await ctx.bot.send_message(ADMIN_ID, f"💬 *{client_name}*:\n\n{text}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ Ответить", callback_data=f"reply_{uid}")]]), parse_mode='Markdown')
         return
     
     try:
@@ -487,12 +484,12 @@ async def handle_text(update, ctx):
             cid = ctx.user_data['reply_client_id']
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("INSERT INTO chat_messages (client_id, message, from_admin) VALUES (%s, %s, TRUE)", (cid, text))
+            cur.execute("INSERT INTO chat_messages (client_id, client_name, message, from_admin) VALUES (%s, 'Админ', %s, TRUE)", (cid, text))
             conn.commit(); cur.close(); conn.close()
             ctx.user_data.clear()
             try:
                 await ctx.bot.send_message(cid, f"📩 *Ответ продавца:*\n\n{text}", parse_mode='Markdown')
-                await update.message.reply_text(f"✅ Отправлено клиенту {cid}!", reply_markup=get_admin_keyboard(), parse_mode='Markdown')
+                await update.message.reply_text(f"✅ Отправлено!", reply_markup=get_admin_keyboard(), parse_mode='Markdown')
             except:
                 await update.message.reply_text("❌ Не удалось отправить", reply_markup=get_admin_keyboard())
     except (ValueError, TypeError):
