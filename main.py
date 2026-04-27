@@ -30,8 +30,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
-            description TEXT DEFAULT '',
             price REAL NOT NULL,
+            cost REAL DEFAULT 0,
             stock INTEGER NOT NULL DEFAULT 0,
             sold INTEGER NOT NULL DEFAULT 0,
             active BOOLEAN DEFAULT TRUE,
@@ -65,12 +65,32 @@ def init_db():
             id SERIAL PRIMARY KEY,
             product_name TEXT NOT NULL,
             price REAL NOT NULL,
+            cost REAL DEFAULT 0,
+            payment_method TEXT DEFAULT '💵 Наличные',
             sold_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
     
     try:
         cur.execute("ALTER TABLE debts DROP CONSTRAINT IF EXISTS debts_debtor_name_key")
+        conn.commit()
+    except:
+        pass
+    
+    try:
+        cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0")
+        conn.commit()
+    except:
+        pass
+    
+    try:
+        cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS cost REAL DEFAULT 0")
+        conn.commit()
+    except:
+        pass
+    
+    try:
+        cur.execute("ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT '💵 Наличные'")
         conn.commit()
     except:
         pass
@@ -148,11 +168,20 @@ async def button_handler(update, ctx):
         ctx.user_data['restock_product_id'] = int(d.split("_")[-1])
         ctx.user_data['awaiting'] = 'restock_amount'
         await q.edit_message_text("📦 Введи количество для пополнения:")
-    elif d.startswith("sell_"): await sell_product(q, int(d.split("_")[-1]))
+    elif d.startswith("sell_"): await choose_payment(q, int(d.split("_")[-1]))
+    elif d.startswith("pay_"):
+        parts = d.split("_")
+        pid = int(parts[1])
+        method = "💳 Карта" if parts[2] == "card" else "💵 Наличные"
+        await sell_product(q, pid, method)
     elif d.startswith("change_price_"):
         ctx.user_data['edit_product_id'] = int(d.split("_")[-1])
         ctx.user_data['awaiting'] = 'change_price'
         await q.edit_message_text("💰 Введи *новую цену* (Br):", parse_mode='Markdown')
+    elif d.startswith("change_cost_"):
+        ctx.user_data['edit_product_id'] = int(d.split("_")[-1])
+        ctx.user_data['awaiting'] = 'change_cost'
+        await q.edit_message_text("📊 Введи *закупочную цену* (Br):", parse_mode='Markdown')
     elif d.startswith("change_stock_"):
         ctx.user_data['edit_product_id'] = int(d.split("_")[-1])
         ctx.user_data['awaiting'] = 'change_stock'
@@ -178,7 +207,15 @@ async def button_handler(update, ctx):
         ctx.user_data['awaiting'] = 'reply_text'
         await q.edit_message_text(f"✏️ Введи *текст ответа* для клиента {d.split('_')[-1]}:", parse_mode='Markdown')
 
-async def sell_product(q, pid):
+async def choose_payment(q, pid):
+    kb = [
+        [InlineKeyboardButton("💳 Карта", callback_data=f"pay_{pid}_card")],
+        [InlineKeyboardButton("💵 Наличные", callback_data=f"pay_{pid}_cash")],
+        [InlineKeyboardButton("🔙 Назад", callback_data=f"edit_product_{pid}")],
+    ]
+    await q.edit_message_text("💳 *Выбери способ оплаты:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+async def sell_product(q, pid, method):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT * FROM products WHERE id=%s", (pid,))
@@ -190,12 +227,14 @@ async def sell_product(q, pid):
         conn.close()
         return
     
+    cost = p.get('cost', 0) or 0
     cur.execute("UPDATE products SET stock=stock-1, sold=sold+1 WHERE id=%s", (pid,))
-    cur.execute("INSERT INTO sales_history (product_name, price) VALUES (%s, %s)", (p['name'], p['price']))
+    cur.execute("INSERT INTO sales_history (product_name, price, cost, payment_method) VALUES (%s, %s, %s, %s)", (p['name'], p['price'], cost, method))
     conn.commit()
     cur.close()
     conn.close()
-    await q.answer("✅ Продано!")
+    
+    await q.answer(f"✅ Продано! ({method})")
     await show_edit_menu(q, pid)
 
 async def show_catalog(q, page=0):
@@ -234,12 +273,14 @@ async def show_edit_menu(q, pid):
         [InlineKeyboardButton("📦 Пополнить (+)", callback_data=f"restock_{pid}")],
         [InlineKeyboardButton("📝 Дать в долг", callback_data=f"debt_{pid}")],
         [InlineKeyboardButton("💰 Изменить цену", callback_data=f"change_price_{pid}")],
+        [InlineKeyboardButton("📊 Закуп. цена", callback_data=f"change_cost_{pid}")],
         [InlineKeyboardButton("📋 Изменить кол-во", callback_data=f"change_stock_{pid}")],
-        [InlineKeyboardButton("📊 Изменить продано", callback_data=f"change_sold_{pid}")],
+        [InlineKeyboardButton("📈 Изменить продано", callback_data=f"change_sold_{pid}")],
         [InlineKeyboardButton("❌ Удалить", callback_data=f"delete_product_{pid}")],
         [InlineKeyboardButton("🔙 Назад", callback_data="my_products")],
     ]
-    await q.edit_message_text(f"📦 *{p['name']}*\n💰 {p['price']} Br\n📦 {p['stock']} шт.\n📊 Продано: {p['sold']} шт.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    cost_text = f"\n📊 Закуп: {p.get('cost', 0) or 0} Br" if p.get('cost') else ""
+    await q.edit_message_text(f"📦 *{p['name']}*\n💰 Цена: {p['price']} Br{cost_text}\n📦 Остаток: {p['stock']} шт.\n📈 Продано: {p['sold']} шт.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def delete_product(q, pid):
     conn = get_db_connection()
@@ -256,16 +297,28 @@ async def show_stats(q):
     cur.execute("SELECT COALESCE(SUM(stock),0) FROM products WHERE active=TRUE"); stock = cur.fetchone()[0]
     cur.execute("SELECT COALESCE(SUM(sold),0) FROM products"); sold = cur.fetchone()[0]
     cur.execute("SELECT COALESCE(SUM(sold*price),0) FROM products"); rev = cur.fetchone()[0]
+    cur.execute("SELECT COALESCE(SUM(sold*cost),0) FROM products"); total_cost = cur.fetchone()[0]
     cur.execute("SELECT COALESCE(SUM(d.amount*p.price),0) FROM debts d JOIN products p ON d.product_id=p.id WHERE d.returned=FALSE"); debt = cur.fetchone()[0]
+    profit = rev - total_cost
     cur.close(); conn.close()
-    await q.edit_message_text(f"📊 *Статистика:*\n\n📦 Товаров: *{total}*\n📋 Остаток: *{stock} шт.*\n🛒 Продано: *{sold} шт.*\n💰 Выручка: *{rev} Br*\n📝 В долгу: *{debt} Br*", reply_markup=get_admin_keyboard(), parse_mode='Markdown')
+    await q.edit_message_text(
+        f"📊 *Статистика:*\n\n"
+        f"📦 Товаров: *{total}*\n"
+        f"📋 Остаток: *{stock} шт.*\n"
+        f"🛒 Продано: *{sold} шт.*\n"
+        f"💰 Выручка: *{rev} Br*\n"
+        f"📊 Затраты: *{total_cost} Br*\n"
+        f"📈 Прибыль: *{profit} Br*\n"
+        f"📝 В долгу: *{debt} Br*",
+        reply_markup=get_admin_keyboard(), parse_mode='Markdown'
+    )
 
 async def show_history(q):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT DATE(sold_at) as day FROM sales_history ORDER BY day DESC LIMIT 7")
+    cur.execute("SELECT DISTINCT DATE(sold_at) FROM sales_history ORDER BY DATE(sold_at) DESC LIMIT 7")
     days = cur.fetchall(); cur.close()
-    if not days: await q.edit_message_text("📅 Нет истории продаж.", reply_markup=get_admin_keyboard()); return
+    if not days: await q.edit_message_text("📅 Нет истории.", reply_markup=get_admin_keyboard()); return
     kb = [[InlineKeyboardButton(str(d[0]), callback_data=f"day_{d[0]}")] for d in days]
     kb.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
     await q.edit_message_text("📅 *Выбери день:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
@@ -273,14 +326,17 @@ async def show_history(q):
 async def show_day_stats(q, day):
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT product_name, COUNT(*) as cnt, SUM(price) as total FROM sales_history WHERE DATE(sold_at)=%s GROUP BY product_name ORDER BY cnt DESC", (day,))
+    cur.execute("SELECT product_name, payment_method, COUNT(*), SUM(price), SUM(cost) FROM sales_history WHERE DATE(sold_at)=%s GROUP BY product_name, payment_method ORDER BY product_name", (day,))
     items = cur.fetchall(); cur.close()
     text = f"📅 *Продажи за {day}:*\n\n"
-    total = 0
-    for name, cnt, sm in items:
-        text += f"• {name}: {cnt} шт. ({sm} Br)\n"
+    total, total_cost = 0, 0
+    for name, method, cnt, sm, cst in items:
+        cst = cst or 0
+        text += f"• {name} ({method}): {cnt} шт. ({sm} Br)\n"
         total += sm
-    text += f"\n💰 *Итого: {total} Br*"
+        total_cost += cst
+    profit = total - total_cost
+    text += f"\n💰 Выручка: *{total} Br*\n📊 Затраты: *{total_cost} Br*\n📈 Прибыль: *{profit} Br*"
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="history")]]), parse_mode='Markdown')
 
 async def show_debts(q):
@@ -350,15 +406,19 @@ async def handle_text(update, ctx):
         if awaiting == 'product_name':
             ctx.user_data['product_name'] = text
             ctx.user_data['awaiting'] = 'product_price'
-            await update.message.reply_text("💰 Цена (Br):")
+            await update.message.reply_text("💰 Цена продажи (Br):")
         elif awaiting == 'product_price':
             ctx.user_data['product_price'] = to_num(text, False)
+            ctx.user_data['awaiting'] = 'product_cost'
+            await update.message.reply_text("📊 Закупочная цена (Br):")
+        elif awaiting == 'product_cost':
+            ctx.user_data['product_cost'] = to_num(text, False)
             ctx.user_data['awaiting'] = 'product_stock'
             await update.message.reply_text("📦 Количество:")
         elif awaiting == 'product_stock':
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("INSERT INTO products (name, price, stock) VALUES (%s, %s, %s)", (ctx.user_data['product_name'], ctx.user_data['product_price'], to_num(text)))
+            cur.execute("INSERT INTO products (name, price, cost, stock) VALUES (%s, %s, %s, %s)", (ctx.user_data['product_name'], ctx.user_data['product_price'], ctx.user_data.get('product_cost', 0), to_num(text)))
             conn.commit(); cur.close(); conn.close()
             name = ctx.user_data['product_name']
             ctx.user_data.clear()
@@ -370,6 +430,13 @@ async def handle_text(update, ctx):
             conn.commit(); cur.close(); conn.close()
             ctx.user_data.clear()
             await update.message.reply_text(f"✅ Цена: *{to_num(text, False)} Br*", reply_markup=get_admin_keyboard(), parse_mode='Markdown')
+        elif awaiting == 'change_cost':
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("UPDATE products SET cost=%s WHERE id=%s", (to_num(text, False), ctx.user_data['edit_product_id']))
+            conn.commit(); cur.close(); conn.close()
+            ctx.user_data.clear()
+            await update.message.reply_text(f"✅ Закуп. цена: *{to_num(text, False)} Br*", reply_markup=get_admin_keyboard(), parse_mode='Markdown')
         elif awaiting == 'change_stock':
             conn = get_db_connection()
             cur = conn.cursor()
