@@ -1,10 +1,11 @@
 import os
 import logging
+import asyncio
+import threading
 from flask import Flask
 from flask_cors import CORS
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-import threading
 
 # --- Настройка ---
 logging.basicConfig(level=logging.INFO)
@@ -246,11 +247,44 @@ def health():
     return "OK", 200
 
 def run_bot():
-    """Запускает бота в отдельном потоке"""
+    """Запускает бота с проверкой подключения"""
+    if not TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN не установлен!")
+        return
+    
+    # Создаём цикл событий для этого потока
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Проверяем подключение к Telegram
+    logger.info("🔍 Проверяем подключение к Telegram API...")
+    
     bot = Application.builder().token(TOKEN).build()
     bot.add_handler(CommandHandler("start", start))
     bot.add_handler(CallbackQueryHandler(button_handler))
     bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    # Пробуем получить информацию о боте
+    try:
+        import asyncio
+        async def test_connection():
+            try:
+                me = await bot.bot.get_me()
+                logger.info(f"✅ Подключение к Telegram успешно! Бот: @{me.username}")
+                return True
+            except Exception as e:
+                logger.error(f"❌ Ошибка подключения к Telegram: {e}")
+                return False
+        
+        # Запускаем проверку
+        result = loop.run_until_complete(test_connection())
+        if not result:
+            logger.error("❌ Не удалось подключиться к Telegram API. Проверьте токен и интернет.")
+            return
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке подключения: {e}")
+        return
     
     logger.info("🤖 Бот запущен и готов к работе!")
     bot.run_polling()
