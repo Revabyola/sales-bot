@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 import threading
 from flask import Flask
 from flask_cors import CORS
@@ -247,41 +246,36 @@ def health():
     return "OK", 200
 
 def run_bot():
-    """Запускает бота с проверкой подключения"""
+    """Запускает бота в отдельном потоке"""
     if not TOKEN:
         logger.error("❌ TELEGRAM_BOT_TOKEN не установлен!")
         return
-    
-    # Создаём цикл событий для этого потока
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # Проверяем подключение к Telegram
+
+    # Проверяем токен
     logger.info("🔍 Проверяем подключение к Telegram API...")
     
+    # Создаём приложение
     bot = Application.builder().token(TOKEN).build()
     bot.add_handler(CommandHandler("start", start))
     bot.add_handler(CallbackQueryHandler(button_handler))
     bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    # Пробуем получить информацию о боте
+    # Пробуем получить информацию о боте (синхронно)
     try:
+        # Используем run_until_complete из уже существующего цикла
         import asyncio
-        async def test_connection():
-            try:
-                me = await bot.bot.get_me()
-                logger.info(f"✅ Подключение к Telegram успешно! Бот: @{me.username}")
-                return True
-            except Exception as e:
-                logger.error(f"❌ Ошибка подключения к Telegram: {e}")
-                return False
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        # Запускаем проверку
-        result = loop.run_until_complete(test_connection())
+        async def test():
+            me = await bot.bot.get_me()
+            logger.info(f"✅ Подключение к Telegram успешно! Бот: @{me.username}")
+            return True
+        
+        result = loop.run_until_complete(test())
         if not result:
-            logger.error("❌ Не удалось подключиться к Telegram API. Проверьте токен и интернет.")
+            logger.error("❌ Не удалось подключиться к Telegram API.")
             return
-            
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке подключения: {e}")
         return
