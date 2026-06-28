@@ -4,6 +4,7 @@ from flask import Flask
 from flask_cors import CORS
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+import threading
 
 # --- Настройка ---
 logging.basicConfig(level=logging.INFO)
@@ -16,11 +17,9 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 ADMIN2_ID = int(os.environ.get("ADMIN2_ID", "0"))
 
-# Хранилище сообщений в памяти (вместо базы данных)
-# Формат: {client_id: [{'text': '...', 'from_admin': False, 'name': '...'}, ...]}
+# Хранилище сообщений в памяти
 chat_history = {}
-# Последний активный чат для админа
-active_chats = {}  # {admin_id: client_id}
+active_chats = {}
 
 def is_admin(uid):
     return uid == ADMIN_ID or uid == ADMIN2_ID
@@ -36,11 +35,9 @@ def get_admin_main_keyboard():
     ])
 
 def get_chat_list_keyboard():
-    """Клавиатура со списком клиентов, у которых есть сообщения"""
     kb = []
     for client_id, messages in chat_history.items():
         if messages:
-            # Берём имя из первого сообщения
             name = messages[0].get('name', f'ID: {client_id}')
             kb.append([InlineKeyboardButton(f"💬 {name}", callback_data=f"open_chat_{client_id}")])
     
@@ -51,7 +48,6 @@ def get_chat_list_keyboard():
     return InlineKeyboardMarkup(kb)
 
 def get_chat_keyboard(client_id):
-    """Клавиатура внутри чата"""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 К списку чатов", callback_data="chat_list")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="back")],
@@ -92,7 +88,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("open_chat_"):
         client_id = int(data.split("_")[-1])
-        # Запоминаем, какой чат открыл админ
         active_chats[uid] = client_id
         await show_chat_messages(q, client_id)
 
@@ -115,7 +110,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer("Нет сообщений")
 
 async def show_chat_list(q):
-    """Показывает список чатов с клиентами"""
     if not chat_history:
         await q.edit_message_text(
             "💬 Нет активных чатов.",
@@ -137,7 +131,6 @@ async def show_chat_list(q):
     )
 
 async def show_chat_messages(q, client_id):
-    """Показывает переписку с конкретным клиентом"""
     messages = chat_history.get(client_id, [])
     name = messages[0].get('name', f'ID: {client_id}') if messages else f'ID: {client_id}'
 
@@ -165,7 +158,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
 
-    # --- Клиент пишет Мастеру ---
     if not is_admin(uid):
         client_name = user.first_name or ""
         if user.last_name:
@@ -173,7 +165,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if user.username:
             client_name += f" (@{user.username})"
 
-        # Сохраняем сообщение в историю
         if uid not in chat_history:
             chat_history[uid] = []
         chat_history[uid].append({
@@ -188,7 +179,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-        # Уведомление Мастеру
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("💬 Ответить", callback_data=f"open_chat_{uid}")]
         ])
@@ -200,14 +190,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # --- Мастер отвечает ---
-    # Проверяем, есть ли активный чат у этого админа
     client_id = active_chats.get(uid)
 
     if not client_id:
-        # Если нет активного чата, проверяем, есть ли клиенты
         if chat_history:
-            # Берём первого попавшегося клиента
             client_id = next(iter(chat_history.keys()))
             active_chats[uid] = client_id
         else:
@@ -217,7 +203,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Проверяем, существует ли клиент
     if client_id not in chat_history:
         await update.message.reply_text(
             "❌ Этот чат уже закрыт.",
@@ -226,10 +211,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         active_chats.pop(uid, None)
         return
 
-    # Получаем имя клиента
     client_name = chat_history[client_id][0].get('name', f'ID: {client_id}')
 
-    # Сохраняем ответ Мастера
     chat_history[client_id].append({
         'text': text,
         'from_admin': True,
@@ -254,30 +237,34 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_admin_main_keyboard()
         )
 
+@app.route('/')
+def home():
+    return "Бот работает!", 200
+
 @app.route('/health')
 def health():
     return "OK", 200
 
-def main():
-    if not TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN не установлен!")
-        return
-
-    logger.info("🤖 Бот запущен и готов к работе! (Без базы данных)")
-
+def run_bot():
+    """Запускает бота в отдельном потоке"""
     bot = Application.builder().token(TOKEN).build()
     bot.add_handler(CommandHandler("start", start))
     bot.add_handler(CallbackQueryHandler(button_handler))
     bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    import threading
-    port = int(os.environ.get('PORT', 10000))
-    threading.Thread(
-        target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False),
-        daemon=True
-    ).start()
-
+    
+    logger.info("🤖 Бот запущен и готов к работе!")
     bot.run_polling()
 
 if __name__ == "__main__":
-    main()
+    if not TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN не установлен!")
+        exit(1)
+    
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Запускаем Flask для Render
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🚀 Flask запущен на порту {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
