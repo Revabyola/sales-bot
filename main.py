@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import asyncio
 from flask import Flask
 from flask_cors import CORS
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -251,7 +252,6 @@ def run_bot():
         logger.error("❌ TELEGRAM_BOT_TOKEN не установлен!")
         return
 
-    # Проверяем токен
     logger.info("🔍 Проверяем подключение к Telegram API...")
     
     # Создаём приложение
@@ -260,10 +260,7 @@ def run_bot():
     bot.add_handler(CallbackQueryHandler(button_handler))
     bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    # Пробуем получить информацию о боте (синхронно)
     try:
-        # Используем run_until_complete из уже существующего цикла
-        import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -276,6 +273,12 @@ def run_bot():
         if not result:
             logger.error("❌ Не удалось подключиться к Telegram API.")
             return
+            
+        # Очищаем вебхук перед запуском (важно!)
+        logger.info("🔄 Очищаю вебхук...")
+        loop.run_until_complete(bot.bot.delete_webhook(drop_pending_updates=True))
+        logger.info("✅ Вебхук очищен")
+        
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке подключения: {e}")
         return
